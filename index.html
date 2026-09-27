@@ -4,6 +4,11 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Registro de Intervenciones</title>
+<!-- Anti-caché para forzar descarga del último HTML -->
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
+
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#2563eb">
 <style>
@@ -190,6 +195,202 @@ supabase.auth.onAuthStateChange((_event, session)=>{
 });
 
 // ---- Listado en vivo ----
+let realtimeChannel = null;
+async function fetchEntries(){
+  const { data, error } = await supabase.from('intervenciones')
+    .select('*').order('fecha', { ascending:false }).limit(300);
+  if(error){ console.error(error); return; }
+  entries = data;
+  updateMaquinaOptions();
+  renderList();
+}
+function startListening(){
+  fetchEntries();
+  if(realtimeChannel) return;
+  realtimeChannel = supabase.channel('intervenciones-live')
+    .on('postgres_changes', { event:'*', schema:'intervenciones', table:'intervenciones' }, ()=> fetchEntries())
+    .subscribe();
+}
+
+function renderList(){
+  const fm=document.getElementById('fMaquina').value;
+  const ft=document.getElementById('fTecnico').value.trim().toLowerCase();
+  const el=document.getElementById('list');
+  let items=entries.filter(e=>{
+    if(fm && e.maquina!==fm) return false;
+    if(ft && !(e.tecnico||'').toLowerCase().includes(ft)) return false;
+    return true;
+  });
+  if(!items.length){ el.innerHTML='<div class="empty">Sin intervenciones registradas todavía.</div>'; return; }
+  el.innerHTML=items.map(e=>{
+    const acciones=[e.calibrado&&'Calibrado', e.cambiado&&'Cambiado', e.revisado&&'Revisado'].filter(Boolean);
+    const nfotos = (e.fotos||[]).length;
+    return `<div class="card entry" data-id="${e.id}">
+      <div class="entry-top"><b>${esc(e.maquina||'(sin máquina)')}</b><span>${fmtDate(e.fecha)}</span></div>
+      <div style="font-size:13px;color:var(--muted);margin-top:2px;">${esc(e.tecnico||'—')}${e.turno?' · '+esc(e.turno):''}</div>
+      <p>${esc(e.falla)}</p>
+      ${acciones.map(a=>`<span class="tag">${a}</span>`).join('')}
+      ${nfotos?`<span class="tag">📷 ${nfotos} foto${nfotos>1?'s':''}</span>`:''}
+    </div>`;
+  }).join('');
+  el.querySelectorAll('.entry').forEach(node=> node.addEventListener('click',()=>openDetail(node.dataset.id)) );
+}
+
+function updateMaquinaOptions(){
+  const set=[...new Set(entries.map(e=>e.maquina).filter(Boolean))].sort();
+  const sel=document.getElementById('fMaquina'); const cur=sel.value;
+  sel.innerHTML='<option value="">Todas las máquinas</option>'+set.map(m=>`<option value="${esc(m)}">${esc(m)}</option>`).join('');
+  sel.value=set.includes(cur)?cur:'';
+  document.getElementById('maquinasList').innerHTML=set.map(m=>`<option value="${esc(m)}">`).join('');
+}
+
+document.getElementById('fMaquina').addEventListener('change',renderList);
+document.getElementById('fTecnico').addEventListener('input',renderList);
+
+// ---- Detalle: genera URLs firmadas solo para lo que se está viendo ----
+async function openDetail(id){
+  const e=entries.find(x=>x.id===id);
+  if(!e) return;
+  const acciones=[e.calibrado&&'Calibrado', e.cambiado&&'Cambiado', e.revisado&&'Revisado'].filter(Boolean);
+
+  document.getElementById('detailSheet').innerHTML=`
+    <div class="closebar">
+      <span style="font-weight:600;">${esc(e.maquina||'(sin máquina)')}</span>
+      <button class="btn-secondary" id="closeDetail">Cerrar</button>
+    </div>
+    <div class="meta">${fmtDate(e.fecha)} · ${esc(e.tecnico||'—')}${e.turno?' · '+esc(e.turno):''}</div>
+    ${acciones.map(a=>`<span class="tag">${a}</span>`).join('')}
+    <div class="block"><h4>Falla en el producto</h4><div>${esc(e.falla)||'—'}</div></div>
+    <div class="block"><h4>Descripción de la intervención</h4><div>${esc(e.descripcion)||'—'}</div></div>
+    <div class="block"><h4>Repuestos utilizados</h4><div>${esc(e.repuestos)||'—'}</div></div>
+    <div class="block" id="photoBlock">${(e.fotos||[]).length ? '<h4>Fotos</h4><div>Cargando fotos...</div>' : ''}</div>
+    <div class="block" style="display:flex; gap:8px;">
+      <button class="btn-secondary" id="btnEdit">Editar (admin)</button>
+      <button class="btn-danger" id="btnDelete">Eliminar (admin)</button>
+    </div>
+    <div class="status err" id="adminStatus"></div>
+  `;
+  document.getElementById('closeDetail').addEventListener('click',()=>document.getElementById('detailOverlay').classList.remove('open'));
+  document.getElementById('btnEdit').addEventListener('click',()=>openForm(e));
+  document.getElementById('btnDelete').addEventListener('click',async()=>{
+    if(!confirm('¿Eliminar este registro definitivamente?')) return;
+    const { error } = await supabase.from('intervenciones').delete().eq('id', e.id);
+    if(error){ document.getElementById('adminStatus').textContent='No tienes permisos de administrador para esta acción.'; }
+    else { document.getElementById('detailOverlay').classList.remove('open'); }
+  });
+  document.getElementById('detailOverlay').classList.add('open');
+
+  if((e.fotos||[]).length){
+    const urls = await Promise.all(e.fotos.map(async (path)=>{
+      const { data, error } = await supabase.storage.from(FOTOS_BUCKET).createSignedUrl(path, 3600);
+      return error ? null : data.signedUrl;
+    }));
+    const block = document.getElementById('photoBlock');
+    if(block){
+      const imgs = urls.filter(Boolean).map(u=>`<img src="${u}">`).join('');
+      block.innerHTML = imgs ? `<h4>Fotos</h4><div class="photos">${imgs}</div>` : '<h4>Fotos</h4><div>No se pudieron cargar.</div>';
+    }
+  }
+}
+
+// ---- Formulario (nueva / editar) ----
+function openForm(existing){
+  editingId = existing ? existing.id : null;
+  document.getElementById('formTitle').textContent = existing ? 'Editar intervención' : 'Nueva intervención';
+  const now=new Date(); now.setMinutes(now.getMinutes()-now.getTimezoneOffset());
+  document.getElementById('fecha').value = existing ? new Date(existing.fecha).toISOString().slice(0,16) : now.toISOString().slice(0,16);
+  document.getElementById('turno').value = existing?.turno || '';
+  document.getElementById('maquina').value = existing?.maquina || '';
+  document.getElementById('falla').value = existing?.falla || '';
+  document.getElementById('descripcion').value = existing?.descripcion || '';
+  document.getElementById('acCalibrado').checked = !!existing?.calibrado;
+  document.getElementById('acCambiado').checked = !!existing?.cambiado;
+  document.getElementById('acRevisado').checked = !!existing?.revisado;
+  document.getElementById('repuestos').value = existing?.repuestos || '';
+  document.getElementById('fotos').value='';
+  document.getElementById('thumbsPreview').innerHTML='';
+  setStatus('');
+  document.getElementById('detailOverlay').classList.remove('open');
+  document.getElementById('formOverlay').classList.add('open');
+}
+document.getElementById('btnNew').addEventListener('click',()=>openForm(null));
+document.getElementById('closeForm').addEventListener('click',()=>document.getElementById('formOverlay').classList.remove('open'));
+
+document.getElementById('fotos').addEventListener('change',(ev)=>{
+  const wrap=document.getElementById('thumbsPreview'); wrap.innerHTML='';
+  [...ev.target.files].forEach(f=>{ const img=document.createElement('img'); img.src=URL.createObjectURL(f); wrap.appendChild(img); });
+});
+
+function setStatus(msg,isErr){
+  const s=document.getElementById('formStatus'); s.textContent=msg||''; s.className='status'+(isErr?' err':'');
+}
+
+document.getElementById('btnGuardar').addEventListener('click', async ()=>{
+  const maquina=document.getElementById('maquina').value.trim();
+  const falla=document.getElementById('falla').value.trim();
+  if(!maquina || !falla){ setStatus('Indica al menos la máquina y la falla detectada.',true); return; }
+  const btn=document.getElementById('btnGuardar'); btn.disabled=true; setStatus('Guardando...');
+  try{
+    let photoPaths = editingId ? (entries.find(x=>x.id===editingId)?.fotos || []) : [];
+    const files=[...document.getElementById('fotos').files];
+    for(let i=0;i<files.length;i++){
+      let blob = files[i];
+      let ext = 'jpg';
+      try{
+        setStatus(`Comprimiendo foto ${i+1}/${files.length}...`);
+        blob = await compressImage(files[i]);
+      }catch(e){
+        console.error('Compresión falló, se sube el original:', e);
+        ext = (files[i].name.split('.').pop()||'jpg').toLowerCase();
+      }
+      if(blob.size > 10*1024*1024){
+        setStatus(`La foto ${i+1} pesa más de 10 MB; se omite.`,true);
+        continue;
+      }
+      const path = `${currentUser.id}/${Date.now()}_${i}.${ext}`;
+      setStatus(`Subiendo foto ${i+1}/${files.length}...`);
+      const { error: upErr } = await supabase.storage.from(FOTOS_BUCKET).upload(path, blob, {
+        contentType: blob.type || 'image/jpeg', upsert:false
+      });
+      if(upErr){
+        console.error('Fallo al subir foto:', upErr);
+        setStatus(`No se pudo subir la foto ${i+1}: ${upErr.message}. Se omite.`,true);
+        continue;
+      }
+      photoPaths.push(path);
+    }
+    const data = {
+      fecha:new Date(document.getElementById('fecha').value).toISOString(),
+      turno:document.getElementById('turno').value,
+      maquina, falla,
+      descripcion:document.getElementById('descripcion').value.trim(),
+      calibrado:document.getElementById('acCalibrado').checked,
+      cambiado:document.getElementById('acCambiado').checked,
+      revisado:document.getElementById('acRevisado').checked,
+      repuestos:document.getElementById('repuestos').value.trim(),
+      fotos:photoPaths,
+      tecnico: soloUsuario(currentUser.email),
+      autor_uid: currentUser.id,
+    };
+    let error;
+    if(editingId){
+      ({ error } = await supabase.from('intervenciones').update(data).eq('id', editingId));
+    } else {
+      ({ error } = await supabase.from('intervenciones').insert(data));
+    }
+    if(error){
+      setStatus(editingId ? 'No tienes permisos de administrador para editar, o hubo un error.' : ('Error al guardar: '+error.message), true);
+      return;
+    }
+    document.getElementById('formOverlay').classList.remove('open');
+  }catch(e){
+    setStatus('Error inesperado: '+(e?.message||e), true);
+  }finally{
+    btn.disabled=false;
+  }
+});
+
+// Registro de Service Worke-
 let realtimeChannel = null;
 async function fetchEntries(){
   const { data, error } = await supabase.from('intervenciones')
