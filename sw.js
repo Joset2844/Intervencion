@@ -1,26 +1,40 @@
-const CACHE = 'intervenciones-v1';
-const SHELL = ['./', './index.html', './manifest.json'];
+const CACHE_NAME = 'intervenciones-v1.0.0';
 
 self.addEventListener('install', (event) => {
-  event.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)));
+  // Se activa inmediatamente sin esperar a cerrar la pestaña
   self.skipWaiting();
 });
 
 self.addEventListener('activate', (event) => {
+  // Limpia cualquier versión anterior de la caché
   event.waitUntil(
-    caches.keys().then((keys) => Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k))))
+    caches.keys().then((cacheNames) => {
+      return Promise.all(
+        cacheNames.map((cache) => {
+          if (cache !== CACHE_NAME) {
+            return caches.delete(cache);
+          }
+        })
+      );
+    }).then(() => self.clients.claim())
   );
-  self.clients.claim();
 });
 
-// Solo cachea el "shell" estático; nunca intercepta llamadas a Firebase
-// (Firestore/Storage/Auth), que necesitan ir siempre a la red.
+// Estrategia Network-First (Prioriza red, respaldo en caché si no hay internet)
 self.addEventListener('fetch', (event) => {
-  const url = event.request.url;
-  if (url.includes('firestore.googleapis.com') || url.includes('googleapis.com') || url.includes('firebasestorage')) {
-    return; // deja pasar sin cachear
-  }
+  if (event.request.method !== 'GET') return;
+
   event.respondWith(
-    caches.match(event.request).then((cached) => cached || fetch(event.request))
+    fetch(event.request)
+      .then((networkResponse) => {
+        if (networkResponse && networkResponse.status === 200) {
+          const responseClone = networkResponse.clone();
+          caches.open(CACHE_NAME).then((cache) => cache.put(event.request, responseClone));
+        }
+        return networkResponse;
+      })
+      .catch(() => {
+        return caches.match(event.request);
+      })
   );
 });
