@@ -131,8 +131,45 @@ import {
   query, orderBy, limit, onSnapshot, serverTimestamp
 } from "https://www.gstatic.com/firebasejs/10.13.2/firebase-firestore.js";
 import {
-  getStorage, ref, uploadBytes, getDownloadURL
+  getStorage, ref, uploadBytesResumable, getDownloadURL
 } from "https://www.gstatic.com/firebasejs/10.13.2/firebase-storage.js";
+
+// Comprime una foto en el navegador antes de subirla: reduce el lado más
+// largo a maxDim px y la reexporta en JPEG con la calidad indicada.
+// Evita depender del tamaño original del móvil (suele ser 3-8 MB).
+function compressImage(file, maxDim=1600, quality=0.82){
+  return new Promise((resolve, reject)=>{
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = ()=>{
+      URL.revokeObjectURL(url);
+      let {width, height} = img;
+      if(width > height && width > maxDim){ height = Math.round(height*maxDim/width); width = maxDim; }
+      else if(height > maxDim){ width = Math.round(width*maxDim/height); height = maxDim; }
+      const canvas = document.createElement('canvas');
+      canvas.width = width; canvas.height = height;
+      canvas.getContext('2d').drawImage(img, 0, 0, width, height);
+      canvas.toBlob((blob)=>{
+        if(!blob) return reject(new Error('No se pudo procesar la imagen'));
+        resolve(blob);
+      }, 'image/jpeg', quality);
+    };
+    img.onerror = ()=>{ URL.revokeObjectURL(url); reject(new Error('Imagen no válida')); };
+    img.src = url;
+  });
+}
+
+// Sube un blob con progreso real (0-100) reportado vía onProgress.
+function uploadWithProgress(storageRef, blob, onProgress){
+  return new Promise((resolve, reject)=>{
+    const task = uploadBytesResumable(storageRef, blob, {contentType:'image/jpeg'});
+    task.on('state_changed',
+      (snap)=> onProgress(Math.round(100*snap.bytesTransferred/snap.totalBytes)),
+      reject,
+      ()=> resolve()
+    );
+  });
+}
 
 // ⚠️ PEGA AQUÍ tu configuración de Firebase (Configuración del proyecto → General → tus apps → Web)
 const firebaseConfig = {
@@ -301,10 +338,21 @@ document.getElementById('btnGuardar').addEventListener('click', async ()=>{
     let photoUrls = editingId ? (entries.find(x=>x._id===editingId)?.fotos || []) : [];
     const files=[...document.getElementById('fotos').files];
     for(let i=0;i<files.length;i++){
-      setStatus(`Subiendo fotos (${i+1}/${files.length})...`);
-      const path = `intervenciones/${currentUser.uid}/${Date.now()}_${i}_${files[i].name}`;
+      let blob;
+      try{
+        setStatus(`Comprimiendo foto ${i+1}/${files.length}...`);
+        blob = await compressImage(files[i]);
+      }catch(e){
+        setStatus(`No se pudo procesar la foto ${i+1}, se omite.`,true);
+        continue;
+      }
+      if(blob.size > 10*1024*1024){
+        setStatus(`La foto ${i+1} sigue pesando demasiado incluso comprimida; se omite.`,true);
+        continue;
+      }
+      const path = `intervenciones/${currentUser.uid}/${Date.now()}_${i}.jpg`;
       const r = ref(storage, path);
-      await uploadBytes(r, files[i]);
+      await uploadWithProgress(r, blob, (pct)=> setStatus(`Subiendo foto ${i+1}/${files.length}... ${pct}%`));
       const url = await getDownloadURL(r);
       photoUrls.push(url);
     }
