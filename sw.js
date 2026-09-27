@@ -1,4 +1,4 @@
-const CACHE_NAME = 'intervenciones-v1.0.0';
+const CACHE_NAME = 'intervenciones-v1.0.1';
 
 self.addEventListener('install', (event) => {
   // Se activa inmediatamente sin esperar a cerrar la pestaña
