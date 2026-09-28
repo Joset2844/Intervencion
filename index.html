@@ -149,11 +149,19 @@ textarea{min-height:64px; resize:vertical;}
     <div id="viewFotos" class="hidden">
       <input type="search" id="pfSearch" placeholder="Buscar falla, máquina, técnico, repuesto...">
       <div class="ptools">
-        <button class="btn-secondary" id="pfSelAll">Seleccionar visibles</button>
+        <select id="pfFilter" style="width:auto;">
+          <option value="all">Todas</option>
+          <option value="linked">Con registro</option>
+          <option value="orphan">Sin registro (huérfanas)</option>
+        </select>
+        <button class="btn-secondary" id="pfRefresh">Actualizar</button>
+        <button class="btn-secondary" id="pfSelAll">Seleccionar todas del filtro</button>
         <button class="btn-danger" id="pfDelete" disabled>Eliminar (0)</button>
       </div>
+      <div class="status" id="pfSummary"></div>
       <div class="status" id="pfStatus"></div>
       <div class="pgrid" id="pgrid"></div>
+      <button class="btn-secondary hidden" id="pfMore" style="width:100%; margin-top:12px;">Ver más</button>
     </div>
   </div>
 </div>
@@ -389,7 +397,6 @@ async function fetchEntries(){
   entries = data;
   updateMaquinaOptions();
   renderList();
-  if(isAdmin && !document.getElementById('viewFotos').classList.contains('hidden')) renderPhotos();
 }
 function startListening(){
   fetchEntries();
@@ -494,19 +501,136 @@ block.querySelectorAll('.photos img').forEach((img, idx)=>{
   }
 }
 
-// ---- Panel admin: fotos ----
+// ---- Panel admin: fotos (todo el contenido del bucket) ----
+const PAGE = 60;
 const urlCache = new Map(); // path -> {url, exp}
 const selected = new Set();
-let photoItems = [];
+let bucketFiles = [];       // {path, size, created}
+let pathToEntry = new Map();
+let shown = [];
+let photoLimit = PAGE;
 let renderToken = 0;
+let loadingInv = false;
+
+function fmtSize(b){ return b >= 1048576 ? (b/1048576).toFixed(1)+' MB' : Math.max(1,Math.round(b/1024))+' KB'; }
+function setPfStatus(msg, err){ const st=document.getElementById('pfStatus'); st.textContent=msg||''; st.className='status'+(err?' err':''); }
 
 function switchTab(t){
   document.getElementById('viewRegistros').classList.toggle('hidden', t!=='registros');
   document.getElementById('viewFotos').classList.toggle('hidden', t!=='fotos');
   document.querySelectorAll('.tab').forEach(b=>b.classList.toggle('active', b.dataset.tab===t));
-  if(t==='fotos') renderPhotos();
+  if(t==='fotos') loadInventory();
 }
 document.querySelectorAll('.tab').forEach(b=>b.addEventListener('click',()=>switchTab(b.dataset.tab)));
+
+async function listFolder(prefix){
+  const all = []; let offset = 0;
+  while(true){
+    const { data, error } = await supabase.storage.from(FOTOS_BUCKET).list(prefix, {
+      limit:1000, offset, sortBy:{ column:'name', order:'asc' } });
+    if(error) throw error;
+    all.push(...data);
+    if(data.length < 1000) break;
+    offset += 1000;
+  }
+  return all;
+}
+async function listBucket(){
+  const root = await listFolder('');
+  const files = [];
+  const add = (path, o)=> files.push({ path, size:o.metadata?.size||0, created:o.created_at||o.updated_at||'' });
+  root.filter(o=>o.id!==null && !o.name.startsWith('.')).forEach(o=>add(o.name, o));
+  const folders = root.filter(o=>o.id===null).map(o=>o.name);
+  const lists = await Promise.all(folders.map(f=>listFolder(f).then(items=>({f, items}))));
+  lists.forEach(({f, items})=> items.filter(o=>o.id!==null && !o.name.startsWith('.')).forEach(o=>add(f+'/'+o.name, o)));
+  files.sort((a,b)=> (b.created||'').localeCompare(a.created||''));
+  return files;
+}
+async function fetchAllEntries(){
+  const all = []; let from = 0;
+  while(true){
+    const { data, error } = await supabase.from('intervenciones')
+      .select('id,fecha,maquina,tecnico,falla,descripcion,repuestos,fotos').order('id').range(from, from+999);
+    if(error) throw error;
+    all.push(...data);
+    if(data.length < 1000) break;
+    from += 1000;
+  }
+  return all;
+}
+
+async function loadInventory(){
+  if(!isAdmin || loadingInv) return;
+  loadingInv = true;
+  setPfStatus('Leyendo el bucket...');
+  try{
+    const [files, ents] = await Promise.all([listBucket(), fetchAllEntries()]);
+    bucketFiles = files;
+    pathToEntry = new Map();
+    ents.forEach(e=> (e.fotos||[]).forEach(p=> pathToEntry.set(p, e)));
+    [...selected].forEach(p=>{ if(!files.some(f=>f.path===p)) selected.delete(p); });
+    setPfStatus('');
+    photoLimit = PAGE;
+    updateSummary();
+    await renderPhotos();
+  }catch(err){
+    console.error(err);
+    setPfStatus('No se pudo leer el bucket: ' + (err?.message||err) + '. Revisa la política SELECT de administrador en Storage.', true);
+  }finally{ loadingInv = false; }
+}
+
+function updateSummary(){
+  const total = bucketFiles.reduce((a,f)=>a+f.size,0);
+  const orf = bucketFiles.filter(f=>!pathToEntry.has(f.path));
+  const orfSize = orf.reduce((a,f)=>a+f.size,0);
+  document.getElementById('pfSummary').textContent =
+    `${bucketFiles.length} fotos en el bucket (${fmtSize(total)}) · huérfanas: ${orf.length} (${fmtSize(orfSize)})`;
+}
+function updateSel(){
+  const b = document.getElementById('pfDelete');
+  b.textContent = `Eliminar (${selected.size})`;
+  b.disabled = !selected.size;
+}
+function filteredItems(){
+  const q = document.getElementById('pfSearch').value.trim().toLowerCase();
+  const f = document.getElementById('pfFilter').value;
+  const out = [];
+  bucketFiles.forEach(fl=>{
+    const e = pathToEntry.get(fl.path) || null;
+    if(f==='linked' && !e) return;
+    if(f==='orphan' && e) return;
+    if(q){
+      if(!e) return;
+      const hay = [e.falla, e.descripcion, e.maquina, e.tecnico, e.repuestos].join(' ').toLowerCase();
+      if(!hay.includes(q)) return;
+    }
+    out.push({ ...fl, e });
+  });
+  return out;
+}
+
+async function renderPhotos(){
+  if(!isAdmin) return;
+  const token = ++renderToken;
+  const grid = document.getElementById('pgrid');
+  const items = filteredItems();
+  shown = items.slice(0, photoLimit);
+  document.getElementById('pfMore').classList.toggle('hidden', items.length <= shown.length);
+  document.getElementById('pfMore').textContent = `Ver más (${items.length - shown.length} restantes)`;
+  updateSel();
+  if(!shown.length){ grid.innerHTML = '<div class="empty" style="grid-column:1/-1;">No hay fotos que coincidan.</div>'; return; }
+  const urls = await signedUrls(shown.map(i=>i.path));
+  if(token !== renderToken) return;
+  shown.forEach((it,i)=>{ it.url = urls[i]; });
+  grid.innerHTML = shown.map((it,i)=>`<div class="pcard">
+    <input type="checkbox" class="psel" data-p="${esc(it.path)}" ${selected.has(it.path)?'checked':''}>
+    <button class="btn-danger pdel" data-i="${i}">🗑</button>
+    ${it.url ? `<img loading="lazy" data-i="${i}" src="${it.url}" alt="">` : '<div class="empty">No disponible</div>'}
+    <div class="pinfo">${it.e
+      ? `<b>${esc(it.e.maquina||'(sin máquina)')}</b><span>${fmtDate(it.e.fecha)} · ${fmtSize(it.size)}</span><p>${esc(it.e.falla)}</p>`
+      : `<b style="color:var(--danger);">Sin registro</b><span>${it.created?fmtDate(it.created):''} · ${fmtSize(it.size)}</span>`}</div>
+  </div>`).join('');
+}
 
 async function signedUrls(paths){
   const now = Date.now();
@@ -518,47 +642,15 @@ async function signedUrls(paths){
   return paths.map(p=>urlCache.get(p)?.url || null);
 }
 
-function updateSel(){
-  const b = document.getElementById('pfDelete');
-  b.textContent = `Eliminar (${selected.size})`;
-  b.disabled = !selected.size;
-}
-
-async function renderPhotos(){
-  if(!isAdmin) return;
-  const token = ++renderToken;
-  const q = document.getElementById('pfSearch').value.trim().toLowerCase();
-  const grid = document.getElementById('pgrid');
-  const items = [];
-  entries.forEach(e=>{
-    const hay = [e.falla, e.descripcion, e.maquina, e.tecnico, e.repuestos].join(' ').toLowerCase();
-    if(q && !hay.includes(q)) return;
-    (e.fotos||[]).forEach(path=> items.push({ path, e }));
-  });
-  [...selected].forEach(p=>{ if(!entries.some(e=>(e.fotos||[]).includes(p))) selected.delete(p); });
-  photoItems = items;
-  updateSel();
-  if(!items.length){ grid.innerHTML = '<div class="empty" style="grid-column:1/-1;">No hay fotos que coincidan.</div>'; return; }
-  const urls = await signedUrls(items.map(i=>i.path));
-  if(token !== renderToken) return;
-  items.forEach((it,i)=>{ it.url = urls[i]; });
-  grid.innerHTML = items.map((it,i)=>`<div class="pcard">
-    <input type="checkbox" class="psel" data-p="${esc(it.path)}" ${selected.has(it.path)?'checked':''}>
-    <button class="btn-danger pdel" data-i="${i}">🗑</button>
-    ${it.url ? `<img loading="lazy" data-i="${i}" src="${it.url}" alt="">` : '<div class="empty">No disponible</div>'}
-    <div class="pinfo"><b>${esc(it.e.maquina||'(sin máquina)')}</b><span>${fmtDate(it.e.fecha)}</span><p>${esc(it.e.falla)}</p></div>
-  </div>`).join('');
-}
-
 document.getElementById('pgrid').addEventListener('click', (ev)=>{
   const del = ev.target.closest('.pdel');
-  if(del){ deletePhotos([photoItems[+del.dataset.i].path]); return; }
+  if(del){ deletePhotos([shown[+del.dataset.i].path]); return; }
   const img = ev.target.closest('img[data-i]');
   if(img){
-    const vis = photoItems.filter(x=>x.url);
-    const idx = vis.indexOf(photoItems[+img.dataset.i]);
+    const vis = shown.filter(x=>x.url);
+    const idx = vis.indexOf(shown[+img.dataset.i]);
     openPhotoViewer(vis.map(x=>x.url), Math.max(0,idx),
-      vis.map(x=>`<b>${esc(x.e.maquina||'')}</b> · ${fmtDate(x.e.fecha)}<br>${esc(x.e.falla)}`));
+      vis.map(x=> x.e ? `<b>${esc(x.e.maquina||'')}</b> · ${fmtDate(x.e.fecha)}<br>${esc(x.e.falla)}` : 'Sin registro asociado'));
   }
 });
 document.getElementById('pgrid').addEventListener('change', (ev)=>{
@@ -567,9 +659,12 @@ document.getElementById('pgrid').addEventListener('change', (ev)=>{
   updateSel();
 });
 let pfTimer = null;
-document.getElementById('pfSearch').addEventListener('input', ()=>{ clearTimeout(pfTimer); pfTimer = setTimeout(renderPhotos, 300); });
+document.getElementById('pfSearch').addEventListener('input', ()=>{ clearTimeout(pfTimer); pfTimer = setTimeout(()=>{ photoLimit=PAGE; renderPhotos(); }, 300); });
+document.getElementById('pfFilter').addEventListener('change', ()=>{ photoLimit=PAGE; renderPhotos(); });
+document.getElementById('pfRefresh').addEventListener('click', loadInventory);
+document.getElementById('pfMore').addEventListener('click', ()=>{ photoLimit += PAGE; renderPhotos(); });
 document.getElementById('pfSelAll').addEventListener('click', ()=>{
-  const paths = photoItems.map(i=>i.path);
+  const paths = filteredItems().map(i=>i.path);
   const all = paths.length && paths.every(p=>selected.has(p));
   paths.forEach(p=> all ? selected.delete(p) : selected.add(p));
   document.querySelectorAll('#pgrid .psel').forEach(c=>{ c.checked = selected.has(c.dataset.p); });
@@ -579,30 +674,34 @@ document.getElementById('pfDelete').addEventListener('click', ()=> deletePhotos(
 
 async function deletePhotos(paths){
   if(!isAdmin || !paths.length) return;
-  if(!confirm(`¿Eliminar ${paths.length} foto(s) definitivamente del almacenamiento y de sus registros?`)) return;
-  const st = document.getElementById('pfStatus');
-  st.className = 'status'; st.textContent = 'Eliminando...';
-  const { data, error } = await supabase.storage.from(FOTOS_BUCKET).remove(paths);
-  if(error){ st.className = 'status err'; st.textContent = 'Error al eliminar: ' + error.message; return; }
-  const names = (data||[]).map(o=>o.name);
+  if(!confirm(`¿Eliminar ${paths.length} foto(s) definitivamente del bucket y de sus registros? No se puede deshacer.`)) return;
+  setPfStatus('Eliminando...');
+  const names = []; let errMsg = '';
+  for(let i=0;i<paths.length;i+=100){
+    const { data, error } = await supabase.storage.from(FOTOS_BUCKET).remove(paths.slice(i,i+100));
+    if(error){ errMsg = error.message; break; }
+    names.push(...(data||[]).map(o=>o.name));
+  }
   const removed = new Set(paths.filter(p=> names.some(n=> n===p || p.endsWith('/'+n))));
   if(!removed.size){
-    st.className = 'status err';
-    st.textContent = 'No se eliminó nada: falta la política DELETE de administrador en el bucket.';
+    setPfStatus(errMsg ? 'Error al eliminar: '+errMsg : 'No se eliminó nada: falta la política DELETE de administrador en el bucket.', true);
     return;
   }
+  const afectados = new Map();
+  removed.forEach(p=>{ const e = pathToEntry.get(p); if(e) afectados.set(e.id, e); });
   let fallos = 0;
-  for(const e of entries.filter(e=>(e.fotos||[]).some(p=>removed.has(p)))){
+  for(const e of afectados.values()){
     const { data: rows, error: upErr } = await supabase.from('intervenciones')
-      .update({ fotos: e.fotos.filter(p=>!removed.has(p)) }).eq('id', e.id).select('id');
+      .update({ fotos: (e.fotos||[]).filter(p=>!removed.has(p)) }).eq('id', e.id).select('id');
     if(upErr || !rows?.length) fallos++;
   }
   removed.forEach(p=>{ selected.delete(p); urlCache.delete(p); });
   const noElim = paths.length - removed.size;
-  st.className = (fallos || noElim) ? 'status err' : 'status';
-  st.textContent = `Eliminadas ${removed.size} foto(s).` + (noElim ? ` ${noElim} no se pudieron borrar del bucket.` : '')
+  const msg = `Eliminadas ${removed.size} foto(s).` + (noElim ? ` ${noElim} no se pudieron borrar del bucket${errMsg?': '+errMsg:''}.` : '')
     + (fallos ? ` ${fallos} registro(s) no se pudieron actualizar (revisa permisos de UPDATE).` : '');
-  await fetchEntries();
+  fetchEntries();
+  await loadInventory();
+  setPfStatus(msg, !!(noElim || fallos));
 }
 
 // ---- Formulario (nueva / editar) ----
