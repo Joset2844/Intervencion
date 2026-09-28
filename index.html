@@ -90,6 +90,12 @@ textarea{min-height:64px; resize:vertical;}
   background:rgba(255,255,255,.18); color:#fff; font-size:22px; z-index:2;}
 .pv-prev{left:10px;} .pv-next{right:10px;}
 @media (hover:none){ .pv-nav{display:none;} }
+.ac-wrap{position:relative;}
+.ac-list{display:none; position:absolute; left:0; top:100%; margin-top:4px; min-width:100%; width:max-content; max-width:80vw; max-height:220px; overflow-y:auto;
+  background:var(--card); border:1px solid var(--border); border-radius:10px; box-shadow:0 8px 24px rgba(0,0,0,.25); z-index:60;}
+.ac-list.open{display:block;}
+.ac-item,.ac-empty{padding:10px 12px; font-size:14px; border-bottom:1px solid var(--border);}
+.ac-item:active{background:var(--chip);} .ac-empty{color:var(--muted);}
 .closebar{display:flex; justify-content:space-between;}
 .status{font-size:12.5px; color:var(--muted); margin-top:8px; min-height:16px;} .status.err{color:var(--danger);}
 .login-wrap{max-width:360px; margin:15vh auto 0; padding:0 16px;}
@@ -132,19 +138,20 @@ textarea{min-height:64px; resize:vertical;}
     <label>Fecha y hora</label><input type="datetime-local" id="fecha">
     <div class="row2">
       <div><label>Turno</label>
-        <select id="turno"><option value="">—</option><option>Mañana</option><option>Tarde</option><option>Noche</option></select>
+        <select id="turno"><option value="">—</option><option value="DIA">DIA</option><option value="NOCHE">NOCHE</option></select>
       </div>
-      <div><label>Máquina</label><input type="text" id="maquina" list="maquinasList" placeholder="Escribe o elige..." autocomplete="off"></div>
+      <div><label>Máquina</label><div class="ac-wrap"><input type="text" id="maquina" placeholder="Escribe o elige..." autocomplete="off"><div class="ac-list" id="acList"></div></div></div>
     </div>
-    <datalist id="maquinasList"></datalist>
     <label>Falla detectada en el producto</label><textarea id="falla"></textarea>
     <label>Descripción de la intervención</label><textarea id="descripcion"></textarea>
     <label>Acciones realizadas</label>
     <div class="checks">
-      <label><input type="checkbox" id="acCalibrado">Calibrado</label>
-      <label><input type="checkbox" id="acCambiado">Cambiado</label>
-      <label><input type="checkbox" id="acRevisado">Revisado</label>
+      <label><input type="checkbox" id="acCalibrado">Calibración</label>
+      <label><input type="checkbox" id="acCambiado">Cambio</label>
+      <label><input type="checkbox" id="acRevisado">Revisión</label>
+      <label><input type="checkbox" id="acOtra">Otra</label>
     </div>
+    <input type="text" id="otraAccion" class="hidden" placeholder="Describe la acción realizada">
     <label>Repuestos utilizados</label><input type="text" id="repuestos">
     <label>Fotos (opcional)</label><input type="file" id="fotos" accept="image/*" multiple>
     <div class="thumbs" id="thumbsPreview"></div>
@@ -258,18 +265,42 @@ async function loadMaquinas(){
       maquinasSheet = [...new Set(lista)];
       try{ localStorage.setItem('maquinasCache', JSON.stringify(maquinasSheet)); }catch(_){}
     }
-  }catch(err){ console.error('No se pudo cargar la lista de máquinas:', err); }
+    maquinasError = false;
+  }catch(err){ maquinasError = !maquinasSheet.length; console.error('No se pudo cargar la lista de máquinas:', err); }
   refreshDatalist();
 }
-function refreshDatalist(){
-  const base = maquinasSheet.length ? maquinasSheet : [...new Set(entries.map(e=>e.maquina).filter(Boolean))].sort();
-  document.getElementById('maquinasList').innerHTML = base.map(m=>`<option value="${esc(m)}">`).join('');
+let maquinasError = false;
+function opcionesMaquinas(){
+  return maquinasSheet.length ? maquinasSheet : [...new Set(entries.map(e=>e.maquina).filter(Boolean))].sort();
 }
+const inpM = document.getElementById('maquina');
+const acList = document.getElementById('acList');
+function renderAc(){
+  const q = inpM.value.trim().toLowerCase();
+  const items = opcionesMaquinas().filter(m=>!q || m.toLowerCase().includes(q)).slice(0,150);
+  acList.innerHTML = items.length
+    ? items.map(m=>`<div class="ac-item" data-v="${esc(m)}">${esc(m)}</div>`).join('')
+    : `<div class="ac-empty">${maquinasSheet.length ? 'Sin coincidencias' : (maquinasError ? 'No se pudo cargar la lista' : 'Cargando lista...')}</div>`;
+  acList.classList.add('open');
+}
+function refreshDatalist(){ if(acList.classList.contains('open')) renderAc(); }
+inpM.addEventListener('focus', renderAc);
+inpM.addEventListener('click', renderAc);
+inpM.addEventListener('input', renderAc);
+inpM.addEventListener('blur', ()=> acList.classList.remove('open'));
+acList.addEventListener('mousedown', (e)=> e.preventDefault());
+acList.addEventListener('click', (e)=>{
+  const it = e.target.closest('.ac-item'); if(!it) return;
+  inpM.value = it.dataset.v; acList.classList.remove('open'); inpM.blur();
+});
 function matchMaquina(v){
   const t=v.trim().toLowerCase();
   return maquinasSheet.find(m=>m.toLowerCase()===t) || null;
 }
 
+function accionesDe(e){
+  return [e.calibrado&&'Calibración', e.cambiado&&'Cambio', e.revisado&&'Revisión', e.otra_accion&&('Otra: '+esc(e.otra_accion))].filter(Boolean);
+}
 function fmtDate(iso){ const d=new Date(iso); return d.toLocaleString('es-ES',{day:'2-digit',month:'2-digit',year:'numeric',hour:'2-digit',minute:'2-digit'}); }
 function esc(s){ return (s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 
@@ -344,7 +375,7 @@ function renderList(){
   });
   if(!items.length){ el.innerHTML='<div class="empty">Sin intervenciones registradas todavía.</div>'; return; }
   el.innerHTML=items.map(e=>{
-    const acciones=[e.calibrado&&'Calibrado', e.cambiado&&'Cambiado', e.revisado&&'Revisado'].filter(Boolean);
+    const acciones=accionesDe(e);
     const nfotos = (e.fotos||[]).length;
     return `<div class="card entry" data-id="${e.id}">
       <div class="entry-top"><b>${esc(e.maquina||'(sin máquina)')}</b><span>${fmtDate(e.fecha)}</span></div>
@@ -372,7 +403,7 @@ document.getElementById('fTecnico').addEventListener('input',renderList);
 async function openDetail(id){
   const e=entries.find(x=>x.id===id);
   if(!e) return;
-  const acciones=[e.calibrado&&'Calibrado', e.cambiado&&'Cambiado', e.revisado&&'Revisado'].filter(Boolean);
+  const acciones=accionesDe(e);
 
   document.getElementById('detailSheet').innerHTML=`
     <div class="closebar">
@@ -434,13 +465,20 @@ function openForm(existing){
   document.getElementById('formTitle').textContent = existing ? 'Editar intervención' : 'Nueva intervención';
   const now=new Date(); now.setMinutes(now.getMinutes()-now.getTimezoneOffset());
   document.getElementById('fecha').value = existing ? new Date(existing.fecha).toISOString().slice(0,16) : now.toISOString().slice(0,16);
-  document.getElementById('turno').value = existing?.turno || '';
+  const tsel=document.getElementById('turno');
+  tsel.querySelectorAll('option[data-legacy]').forEach(o=>o.remove());
+  if(existing?.turno && ![...tsel.options].some(o=>o.value===existing.turno)){ const o=new Option(existing.turno,existing.turno); o.dataset.legacy='1'; tsel.add(o); }
+  tsel.value = existing?.turno || '';
   document.getElementById('maquina').value = existing?.maquina || '';
   document.getElementById('falla').value = existing?.falla || '';
   document.getElementById('descripcion').value = existing?.descripcion || '';
   document.getElementById('acCalibrado').checked = !!existing?.calibrado;
   document.getElementById('acCambiado').checked = !!existing?.cambiado;
   document.getElementById('acRevisado').checked = !!existing?.revisado;
+  document.getElementById('acOtra').checked = !!existing?.otra_accion;
+  document.getElementById('otraAccion').value = existing?.otra_accion || '';
+  document.getElementById('otraAccion').classList.toggle('hidden', !existing?.otra_accion);
+  if(!maquinasSheet.length) loadMaquinas();
   document.getElementById('repuestos').value = existing?.repuestos || '';
   document.getElementById('fotos').value='';
   document.getElementById('thumbsPreview').innerHTML='';
@@ -448,6 +486,10 @@ function openForm(existing){
   document.getElementById('detailOverlay').classList.remove('open');
   document.getElementById('formOverlay').classList.add('open');
 }
+document.getElementById('acOtra').addEventListener('change',(ev)=>{
+  const t=document.getElementById('otraAccion'); t.classList.toggle('hidden', !ev.target.checked);
+  if(ev.target.checked) t.focus(); else t.value='';
+});
 document.getElementById('btnNew').addEventListener('click',()=>openForm(null));
 document.getElementById('closeForm').addEventListener('click',()=>document.getElementById('formOverlay').classList.remove('open'));
 
@@ -470,6 +512,9 @@ document.getElementById('btnGuardar').addEventListener('click', async ()=>{
     if(!ok){ setStatus('Selecciona una máquina de la lista.',true); return; }
     document.getElementById('maquina').value = ok;
   }
+  const otraOn = document.getElementById('acOtra').checked;
+  const otraTxt = document.getElementById('otraAccion').value.trim();
+  if(otraOn && !otraTxt){ setStatus('Describe la otra acción realizada.',true); return; }
   const maquinaFinal = document.getElementById('maquina').value.trim();
   const btn=document.getElementById('btnGuardar'); btn.disabled=true; setStatus('Guardando...');
   try{
@@ -509,6 +554,7 @@ document.getElementById('btnGuardar').addEventListener('click', async ()=>{
       calibrado:document.getElementById('acCalibrado').checked,
       cambiado:document.getElementById('acCambiado').checked,
       revisado:document.getElementById('acRevisado').checked,
+      otra_accion: otraOn ? otraTxt : '',
       repuestos:document.getElementById('repuestos').value.trim(),
       fotos:photoPaths,
       tecnico: soloUsuario(currentUser.email),
