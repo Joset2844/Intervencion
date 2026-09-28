@@ -415,31 +415,43 @@ let maquinasSheet = [];
 try{ maquinasSheet = JSON.parse(localStorage.getItem('maquinasCache')||'[]'); }catch(_){}
 let maquinasError = false;
 
-function primeraColumnaCSV(text){
-  const col=[]; let field='', inQ=false, first=true;
+function filasCSV(text){
+  const rows=[]; let row=[], field='', inQ=false;
   for(let i=0;i<text.length;i++){
     const c=text[i];
     if(inQ){
       if(c==='"'){ if(text[i+1]==='"'){ field+='"'; i++; } else inQ=false; }
       else field+=c;
     } else if(c==='"'){ inQ=true; }
-    else if(c===','){ if(first){ col.push(field); first=false; } field=''; }
+    else if(c===','){ row.push(field); field=''; }
     else if(c==='\n' || c==='\r'){
       if(c==='\r' && text[i+1]==='\n') i++;
-      if(first) col.push(field);
-      field=''; first=true;
+      row.push(field); rows.push(row); row=[]; field='';
     } else field+=c;
   }
-  if(field || !first) { if(first) col.push(field); }
-  return col;
+  if(field || row.length){ row.push(field); rows.push(row); }
+  return rows;
 }
 async function loadMaquinas(){
   try{
     const r = await fetch(MAQUINAS_CSV_URL, { cache:'no-store' });
     if(!r.ok) throw new Error('HTTP '+r.status);
-    const lista = primeraColumnaCSV(await r.text()).map(x=>x.trim()).filter(Boolean).slice(1);
+    const filas = filasCSV(await r.text()).slice(1);
+    const areas = new Map();
+    for(const f of filas){
+      const nombre = (f[0]||'').trim();
+      if(!nombre || areas.has(nombre)) continue;
+      areas.set(nombre, (f[3]||'').trim().toUpperCase());
+    }
+    const rango = a => a==='V' ? 0 : 1;
+    const lista = [...areas.keys()]
+      .filter(n => areas.get(n)==='V' || areas.get(n)==='P')
+      .sort((a,b)=>
+        rango(areas.get(a)) - rango(areas.get(b)) ||
+        a.localeCompare(b, 'es', { numeric:true, sensitivity:'base' })
+      );
     if(lista.length){
-      maquinasSheet = [...new Set(lista)];
+      maquinasSheet = lista;
       try{ localStorage.setItem('maquinasCache', JSON.stringify(maquinasSheet)); }catch(_){}
     }
     maquinasError = false;
