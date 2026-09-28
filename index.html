@@ -81,8 +81,8 @@ textarea{min-height:64px; resize:vertical;}
 .photo-viewer.open{display:flex;}
 .pv-track{flex:1; display:flex; overflow-x:auto; scroll-snap-type:x mandatory; -webkit-overflow-scrolling:touch; scrollbar-width:none;}
 .pv-track::-webkit-scrollbar{display:none;}
-.pv-slide{flex:0 0 100%; scroll-snap-align:center; scroll-snap-stop:always; display:flex; align-items:center; justify-content:center; padding:56px 8px 24px;}
-.pv-slide img{max-width:100%; max-height:100%; object-fit:contain; border-radius:6px;}
+.pv-slide{flex:0 0 100%; scroll-snap-align:center; scroll-snap-stop:always; display:flex; flex-direction:column; align-items:center; justify-content:center; padding:56px 8px 24px;}
+.pv-slide img{max-width:100%; max-height:100%; min-height:0; flex:0 1 auto; object-fit:contain; border-radius:6px;}
 .photo-viewer-close{position:absolute; top:calc(12px + env(safe-area-inset-top,0px)); right:12px; width:42px; height:42px; border:0; border-radius:50%;
   background:rgba(255,255,255,.18); color:#fff; font-size:24px; cursor:pointer; z-index:2;}
 .pv-count{position:absolute; top:calc(20px + env(safe-area-inset-top,0px)); left:16px; color:#fff; font-size:14px; z-index:2;}
@@ -96,6 +96,18 @@ textarea{min-height:64px; resize:vertical;}
 .ac-list.open{display:block;}
 .ac-item,.ac-empty{padding:10px 12px; font-size:14px; border-bottom:1px solid var(--border);}
 .ac-item:active{background:var(--chip);} .ac-empty{color:var(--muted);}
+.tabs{display:flex; gap:6px; padding:8px 14px 0; max-width:760px; margin:0 auto;}
+.tab{background:transparent; color:var(--muted); border-radius:10px 10px 0 0; padding:9px 16px; font-weight:600; border-bottom:2px solid transparent;}
+.tab.active{color:var(--accent); border-bottom-color:var(--accent);}
+.ptools{display:flex; gap:8px; flex-wrap:wrap; margin-top:8px;}
+.pgrid{display:grid; grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:10px; margin-top:10px;}
+.pcard{background:var(--card); border:1px solid var(--border); border-radius:12px; overflow:hidden; position:relative;}
+.pcard img{width:100%; aspect-ratio:1; object-fit:cover; display:block; cursor:pointer; background:var(--bg);}
+.pinfo{padding:8px; font-size:12px;} .pinfo b{display:block; font-size:12.5px;}
+.pinfo p{margin:4px 0 0; color:var(--muted); display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden;}
+.psel{position:absolute; top:8px; left:8px; width:22px; height:22px; accent-color:var(--accent);}
+.pdel{position:absolute; top:6px; right:6px; padding:4px 8px; font-size:14px;}
+.pv-cap{color:#fff; font-size:13px; text-align:center; margin-top:8px; max-height:22vh; overflow:auto; flex:none; padding:0 8px;}
 .closebar{display:flex; justify-content:space-between;}
 .status{font-size:12.5px; color:var(--muted); margin-top:8px; min-height:16px;} .status.err{color:var(--danger);}
 .login-wrap{max-width:360px; margin:15vh auto 0; padding:0 16px;}
@@ -122,12 +134,27 @@ textarea{min-height:64px; resize:vertical;}
       <button class="btn-secondary" id="btnLogout">Salir</button>
     </div>
   </header>
+  <div class="tabs hidden" id="tabs">
+    <button class="tab active" data-tab="registros">Registros</button>
+    <button class="tab" data-tab="fotos">Fotos</button>
+  </div>
   <div class="container">
+    <div id="viewRegistros">
     <div class="filters">
       <select id="fMaquina"><option value="">Todas las máquinas</option></select>
       <input type="text" id="fTecnico" placeholder="Técnico...">
     </div>
     <div id="list"></div>
+    </div>
+    <div id="viewFotos" class="hidden">
+      <input type="search" id="pfSearch" placeholder="Buscar falla, máquina, técnico, repuesto...">
+      <div class="ptools">
+        <button class="btn-secondary" id="pfSelAll">Seleccionar visibles</button>
+        <button class="btn-danger" id="pfDelete" disabled>Eliminar (0)</button>
+      </div>
+      <div class="status" id="pfStatus"></div>
+      <div class="pgrid" id="pgrid"></div>
+    </div>
   </div>
 </div>
 
@@ -192,6 +219,8 @@ function soloUsuario(correo){ return (correo||'').split('@')[0]; }
 let currentUser = null;
 let entries = [];
 let editingId = null;
+const ADMIN_USERS = ['admin']; // usuarios que ven la pestaña Fotos
+let isAdmin = false;
 
 // ---- Visor de fotos: galería deslizante ----
 const photoViewer = document.getElementById('photoViewer');
@@ -205,8 +234,8 @@ function pvGo(i){
   i = Math.max(0, Math.min(n-1, i));
   pvTrack.scrollTo({ left: i * pvTrack.clientWidth, behavior:'smooth' });
 }
-function openPhotoViewer(urls, start=0){
-  pvTrack.innerHTML = urls.map((u,i)=>`<div class="pv-slide"><img src="${u}" alt="Foto ${i+1}"></div>`).join('');
+function openPhotoViewer(urls, start=0, captions=[]){
+  pvTrack.innerHTML = urls.map((u,i)=>`<div class="pv-slide"><img src="${u}" alt="Foto ${i+1}">${captions[i]?`<div class="pv-cap">${captions[i]}</div>`:''}</div>`).join('');
   photoViewer.classList.add('open');
   pvTrack.style.scrollBehavior = 'auto';
   pvTrack.scrollLeft = start * pvTrack.clientWidth;
@@ -340,10 +369,15 @@ document.getElementById('btnLogin').addEventListener('click', async ()=>{
 document.getElementById('btnLogout').addEventListener('click', ()=> supabase.auth.signOut());
 
 supabase.auth.onAuthStateChange((_event, session)=>{
+  const prevId = currentUser?.id;
   currentUser = session?.user || null;
+  isAdmin = !!currentUser && ADMIN_USERS.includes(soloUsuario(currentUser.email));
+  document.getElementById('tabs').classList.toggle('hidden', !isAdmin);
   document.getElementById('loginScreen').classList.toggle('hidden', !!currentUser);
   document.getElementById('app').classList.toggle('hidden', !currentUser);
   if(currentUser){ loadMaquinas(); startListening(); }
+  if(isAdmin && currentUser.id !== prevId) switchTab('fotos');
+  if(!isAdmin) switchTab('registros');
 });
 
 // ---- Listado en vivo ----
@@ -355,6 +389,7 @@ async function fetchEntries(){
   entries = data;
   updateMaquinaOptions();
   renderList();
+  if(isAdmin && !document.getElementById('viewFotos').classList.contains('hidden')) renderPhotos();
 }
 function startListening(){
   fetchEntries();
@@ -457,6 +492,117 @@ block.querySelectorAll('.photos img').forEach((img, idx)=>{
 });
     }
   }
+}
+
+// ---- Panel admin: fotos ----
+const urlCache = new Map(); // path -> {url, exp}
+const selected = new Set();
+let photoItems = [];
+let renderToken = 0;
+
+function switchTab(t){
+  document.getElementById('viewRegistros').classList.toggle('hidden', t!=='registros');
+  document.getElementById('viewFotos').classList.toggle('hidden', t!=='fotos');
+  document.querySelectorAll('.tab').forEach(b=>b.classList.toggle('active', b.dataset.tab===t));
+  if(t==='fotos') renderPhotos();
+}
+document.querySelectorAll('.tab').forEach(b=>b.addEventListener('click',()=>switchTab(b.dataset.tab)));
+
+async function signedUrls(paths){
+  const now = Date.now();
+  const need = paths.filter(p=>!(urlCache.get(p)?.exp > now));
+  if(need.length){
+    const { data } = await supabase.storage.from(FOTOS_BUCKET).createSignedUrls(need, 3600);
+    (data||[]).forEach(r=>{ if(r.signedUrl) urlCache.set(r.path, { url:r.signedUrl, exp: now + 50*60*1000 }); });
+  }
+  return paths.map(p=>urlCache.get(p)?.url || null);
+}
+
+function updateSel(){
+  const b = document.getElementById('pfDelete');
+  b.textContent = `Eliminar (${selected.size})`;
+  b.disabled = !selected.size;
+}
+
+async function renderPhotos(){
+  if(!isAdmin) return;
+  const token = ++renderToken;
+  const q = document.getElementById('pfSearch').value.trim().toLowerCase();
+  const grid = document.getElementById('pgrid');
+  const items = [];
+  entries.forEach(e=>{
+    const hay = [e.falla, e.descripcion, e.maquina, e.tecnico, e.repuestos].join(' ').toLowerCase();
+    if(q && !hay.includes(q)) return;
+    (e.fotos||[]).forEach(path=> items.push({ path, e }));
+  });
+  [...selected].forEach(p=>{ if(!entries.some(e=>(e.fotos||[]).includes(p))) selected.delete(p); });
+  photoItems = items;
+  updateSel();
+  if(!items.length){ grid.innerHTML = '<div class="empty" style="grid-column:1/-1;">No hay fotos que coincidan.</div>'; return; }
+  const urls = await signedUrls(items.map(i=>i.path));
+  if(token !== renderToken) return;
+  items.forEach((it,i)=>{ it.url = urls[i]; });
+  grid.innerHTML = items.map((it,i)=>`<div class="pcard">
+    <input type="checkbox" class="psel" data-p="${esc(it.path)}" ${selected.has(it.path)?'checked':''}>
+    <button class="btn-danger pdel" data-i="${i}">🗑</button>
+    ${it.url ? `<img loading="lazy" data-i="${i}" src="${it.url}" alt="">` : '<div class="empty">No disponible</div>'}
+    <div class="pinfo"><b>${esc(it.e.maquina||'(sin máquina)')}</b><span>${fmtDate(it.e.fecha)}</span><p>${esc(it.e.falla)}</p></div>
+  </div>`).join('');
+}
+
+document.getElementById('pgrid').addEventListener('click', (ev)=>{
+  const del = ev.target.closest('.pdel');
+  if(del){ deletePhotos([photoItems[+del.dataset.i].path]); return; }
+  const img = ev.target.closest('img[data-i]');
+  if(img){
+    const vis = photoItems.filter(x=>x.url);
+    const idx = vis.indexOf(photoItems[+img.dataset.i]);
+    openPhotoViewer(vis.map(x=>x.url), Math.max(0,idx),
+      vis.map(x=>`<b>${esc(x.e.maquina||'')}</b> · ${fmtDate(x.e.fecha)}<br>${esc(x.e.falla)}`));
+  }
+});
+document.getElementById('pgrid').addEventListener('change', (ev)=>{
+  const c = ev.target.closest('.psel'); if(!c) return;
+  if(c.checked) selected.add(c.dataset.p); else selected.delete(c.dataset.p);
+  updateSel();
+});
+let pfTimer = null;
+document.getElementById('pfSearch').addEventListener('input', ()=>{ clearTimeout(pfTimer); pfTimer = setTimeout(renderPhotos, 300); });
+document.getElementById('pfSelAll').addEventListener('click', ()=>{
+  const paths = photoItems.map(i=>i.path);
+  const all = paths.length && paths.every(p=>selected.has(p));
+  paths.forEach(p=> all ? selected.delete(p) : selected.add(p));
+  document.querySelectorAll('#pgrid .psel').forEach(c=>{ c.checked = selected.has(c.dataset.p); });
+  updateSel();
+});
+document.getElementById('pfDelete').addEventListener('click', ()=> deletePhotos([...selected]));
+
+async function deletePhotos(paths){
+  if(!isAdmin || !paths.length) return;
+  if(!confirm(`¿Eliminar ${paths.length} foto(s) definitivamente del almacenamiento y de sus registros?`)) return;
+  const st = document.getElementById('pfStatus');
+  st.className = 'status'; st.textContent = 'Eliminando...';
+  const { data, error } = await supabase.storage.from(FOTOS_BUCKET).remove(paths);
+  if(error){ st.className = 'status err'; st.textContent = 'Error al eliminar: ' + error.message; return; }
+  const names = (data||[]).map(o=>o.name);
+  const removed = new Set(paths.filter(p=> names.some(n=> n===p || p.endsWith('/'+n))));
+  if(!removed.size){
+    st.className = 'status err';
+    st.textContent = 'No se eliminó nada: falta la política DELETE de administrador en el bucket.';
+    return;
+  }
+  let fallos = 0;
+  for(const e of entries.filter(e=>(e.fotos||[]).some(p=>removed.has(p)))){
+    const { data: rows, error: upErr } = await supabase.from('intervenciones')
+      .update({ fotos: e.fotos.filter(p=>!removed.has(p)) }).eq('id', e.id).select('id');
+    if(upErr || !rows?.length) fallos++;
+  }
+  removed.forEach(p=>{ selected.delete(p); urlCache.delete(p); });
+  const noElim = paths.length - removed.size;
+  st.className = (fallos || noElim) ? 'status err' : 'status';
+  st.textContent = `Eliminadas ${removed.size} foto(s).` + (noElim ? ` ${noElim} no se pudieron borrar del bucket.` : '')
+    + (fallos ? ` ${fallos} registro(s) no se pudieron actualizar (revisa permisos de UPDATE).` : '');
+  await fetchEntries();
 }
 
 // ---- Formulario (nueva / editar) ----
