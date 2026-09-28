@@ -108,6 +108,15 @@ textarea{min-height:64px; resize:vertical;}
 .psel{position:absolute; top:8px; left:8px; width:22px; height:22px; accent-color:var(--accent);}
 .pdel{position:absolute; top:6px; right:6px; padding:4px 8px; font-size:14px;}
 .pv-cap{color:#fff; font-size:13px; text-align:center; margin-top:8px; max-height:22vh; overflow:auto; flex:none; padding:0 8px;}
+.chips{display:flex; gap:8px; flex-wrap:wrap; margin-bottom:10px;}
+.chipbtn{background:var(--chip); color:var(--text);}
+.chipbtn.active{background:var(--accent); color:var(--accent-text); font-weight:600;}
+.trow{display:flex; gap:10px; align-items:center; background:var(--card); border:1px solid var(--border); border-radius:12px; padding:10px 12px; margin-bottom:8px;}
+.trank{width:28px; color:var(--muted); font-size:13px; text-align:right;}
+.tmain{flex:1; min-width:0;}
+.ttop{display:flex; justify-content:space-between; gap:8px; font-size:14px;}
+.ttop b{overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+.tbar{height:6px; border-radius:4px; background:var(--accent); margin-top:6px; min-width:2px;}
 .closebar{display:flex; justify-content:space-between;}
 .status{font-size:12.5px; color:var(--muted); margin-top:8px; min-height:16px;} .status.err{color:var(--danger);}
 .login-wrap{max-width:360px; margin:15vh auto 0; padding:0 16px;}
@@ -137,6 +146,7 @@ textarea{min-height:64px; resize:vertical;}
   <div class="tabs hidden" id="tabs">
     <button class="tab active" data-tab="registros">Registros</button>
     <button class="tab" data-tab="fotos">Fotos</button>
+    <button class="tab" data-tab="top">Top</button>
   </div>
   <div class="container">
     <div id="viewRegistros">
@@ -162,6 +172,24 @@ textarea{min-height:64px; resize:vertical;}
       <div class="status" id="pfStatus"></div>
       <div class="pgrid" id="pgrid"></div>
       <button class="btn-secondary hidden" id="pfMore" style="width:100%; margin-top:12px;">Ver más</button>
+    </div>
+    <div id="viewTop" class="hidden">
+      <div class="chips" id="topChips">
+        <button class="chipbtn active" data-r="7">7 días</button>
+        <button class="chipbtn" data-r="15">15 días</button>
+        <button class="chipbtn" data-r="30">30 días</button>
+        <button class="chipbtn" data-r="all">Histórico</button>
+      </div>
+      <div class="ptools" style="margin-top:0;">
+        <select id="topOrder" style="width:auto;">
+          <option value="desc">Descendente (más intervenidas)</option>
+          <option value="asc">Ascendente (menos intervenidas)</option>
+        </select>
+        <button class="btn-secondary" id="topRefresh">Actualizar</button>
+      </div>
+      <div class="checks" style="margin:10px 0 0;"><label><input type="checkbox" id="topZeros">Incluir máquinas sin intervenciones</label></div>
+      <div class="status" id="topSummary"></div>
+      <div id="topList" style="margin-top:10px;"></div>
     </div>
   </div>
 </div>
@@ -518,8 +546,10 @@ function setPfStatus(msg, err){ const st=document.getElementById('pfStatus'); st
 function switchTab(t){
   document.getElementById('viewRegistros').classList.toggle('hidden', t!=='registros');
   document.getElementById('viewFotos').classList.toggle('hidden', t!=='fotos');
+  document.getElementById('viewTop').classList.toggle('hidden', t!=='top');
   document.querySelectorAll('.tab').forEach(b=>b.classList.toggle('active', b.dataset.tab===t));
   if(t==='fotos') loadInventory();
+  if(t==='top') loadTop();
 }
 document.querySelectorAll('.tab').forEach(b=>b.addEventListener('click',()=>switchTab(b.dataset.tab)));
 
@@ -703,6 +733,72 @@ async function deletePhotos(paths){
   await loadInventory();
   setPfStatus(msg, !!(noElim || fallos));
 }
+
+// ---- Panel admin: top de intervenciones por máquina ----
+let topRows = [];
+let topRange = '7';
+let loadingTop = false;
+
+async function loadTop(){
+  if(!isAdmin || loadingTop) return;
+  loadingTop = true;
+  const sum = document.getElementById('topSummary');
+  sum.className = 'status'; sum.textContent = 'Cargando...';
+  try{
+    const all = []; let from = 0;
+    while(true){
+      const { data, error } = await supabase.from('intervenciones').select('maquina,fecha').order('id').range(from, from+999);
+      if(error) throw error;
+      all.push(...data);
+      if(data.length < 1000) break;
+      from += 1000;
+    }
+    topRows = all.map(r=>({ m:(r.maquina||'').trim(), t:new Date(r.fecha).getTime() }));
+    renderTop();
+  }catch(err){
+    console.error(err);
+    sum.className = 'status err'; sum.textContent = 'No se pudo cargar: ' + (err?.message||err);
+  }finally{ loadingTop = false; }
+}
+
+function renderTop(){
+  const days = topRange === 'all' ? null : +topRange;
+  const since = days ? Date.now() - days*86400000 : 0;
+  const order = document.getElementById('topOrder').value;
+  const incl = document.getElementById('topZeros').checked;
+  const canon = new Map(maquinasSheet.map(m=>[m.toLowerCase(), m]));
+  const map = new Map();
+  let total = 0;
+  topRows.forEach(r=>{
+    if(days && !(r.t >= since)) return;
+    const name = r.m || '(sin máquina)';
+    const key = name.toLowerCase();
+    const o = map.get(key) || { name: canon.get(key) || name, count: 0 };
+    o.count++; map.set(key, o); total++;
+  });
+  if(incl) maquinasSheet.forEach(m=>{ const k = m.toLowerCase(); if(!map.has(k)) map.set(k, { name:m, count:0 }); });
+  const rows = [...map.values()].sort((a,b)=> (order==='asc' ? a.count-b.count : b.count-a.count) || a.name.localeCompare(b.name));
+  const max = Math.max(1, ...rows.map(r=>r.count));
+  const label = days ? `últimos ${days} días` : 'histórico completo';
+  const sum = document.getElementById('topSummary');
+  sum.className = 'status';
+  sum.textContent = `${total} intervenciones · ${rows.length} máquinas · ${label}`;
+  document.getElementById('topList').innerHTML = rows.length
+    ? rows.map((r,i)=>`<div class="trow"><div class="trank">${i+1}</div><div class="tmain">
+        <div class="ttop"><b>${esc(r.name)}</b><span>${r.count}</span></div>
+        <div class="tbar" style="width:${Math.round(r.count/max*100)}%;${r.count?'':'opacity:.15;'}"></div></div></div>`).join('')
+    : '<div class="empty">Sin intervenciones en este rango.</div>';
+}
+
+document.getElementById('topChips').addEventListener('click', (ev)=>{
+  const b = ev.target.closest('.chipbtn'); if(!b) return;
+  topRange = b.dataset.r;
+  document.querySelectorAll('#topChips .chipbtn').forEach(x=>x.classList.toggle('active', x===b));
+  renderTop();
+});
+document.getElementById('topOrder').addEventListener('change', renderTop);
+document.getElementById('topZeros').addEventListener('change', renderTop);
+document.getElementById('topRefresh').addEventListener('click', loadTop);
 
 // ---- Formulario (nueva / editar) ----
 function openForm(existing){
